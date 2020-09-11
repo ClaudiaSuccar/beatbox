@@ -1,5 +1,5 @@
 # BeatBox
-Virtual beatbox sequencer. (See srouce code for full documentation)
+Virtual beatbox sequencer. (See source code for full documentation)
 
 1. Uses the following imports to create a virtual beatbox. Instruments are derived from the MIDI package and the GUI is implemented using Swing.
 
