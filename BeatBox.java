@@ -3,7 +3,9 @@ import javax.swing.*;
 import javax.sound.midi.*;
 import java.util.*;
 import java.awt.event.*;
+import javax.swing.event.*;
 import java.io.*;
+import java.net.*;
 
 public class BeatBox {
 
@@ -11,8 +13,18 @@ public class BeatBox {
   ArrayList<JCheckBox> checkboxList; // a list of the checkboxes
   Sequencer sequencer; // sequencer for music
   Sequence sequence;
+  Sequence mySequence = null; // stores user's sequence to send
   Track track;
   JFrame theFrame; // the frame everything is placed on
+  JList incomingList; // displays incoming messages
+  JTextField userMessage; // textbox for user to send message
+  int nextNum; // stores number of user messages (starting from 0)
+  Vector<String> listVector = new Vector<String>(); // deprecated but needed for JList data
+  String userName; // hold username passed into command-line argument
+  ObjectOutputStream out; // initialize output stream
+  ObjectInputStream in; // initialize input stream
+  HashMap<String, boolean[]> otherSeqsMap = new HashMap<String, boolean[]>();
+  // map that is used to send the user message and the array list of checkbox boolean states
 
   String[] instrumentNames = {"Bass Drum", "Closed Hi-Hat", "Open Hi-Hat", "Acoustic Snare", "Crash Cymbal",
                               "Hand Clap", "High Tom", "Hi Bongo", "Maracas", "Whistle", "Low Conga", "Cowbell",
@@ -27,11 +39,30 @@ public class BeatBox {
     catch (ClassNotFoundException e) {e.printStackTrace();}
     catch (InstantiationException e) {e.printStackTrace();}
     catch (IllegalAccessException e) {e.printStackTrace();}
-    new BeatBox().buildGUI();
+    try {
+      new BeatBox().startUp(args[0]); // args[0] is the user ID/screen name (REQUIRES command-line argument)
+    } catch (Exception ex) {
+      System.out.println("Missing command-line argument for userName. 'Example: java BeatBox coolcat'");
+    }
+  }
+
+  public void startUp(String name) {
+    userName = name; // sets userName from command-line argument
+    try { // attempts to connect to server
+      Socket socket = new Socket("127.0.0.1", 4242);
+      out = new ObjectOutputStream(socket.getOutputStream()); // for output to server
+      in = new ObjectInputStream(socket.getInputStream()); // for input from server
+      Thread remote = new Thread(new RemoteReader()); // thread to read from server
+      remote.start();
+    } catch (Exception ex) {
+      System.out.println("Failed to connect to server.");
+    }
+    setUpMidi(); // sets the default actions for sequencer / sequence / track
+    buildGUI(); // builds the user interface
   }
 
   public void buildGUI() {
-    theFrame = new JFrame("Cyber BeatBox"); // creates a window titled with cyber BeatBox
+    theFrame = new JFrame("Virtual Beat Box"); // creates a window titled with cyber BeatBox
     theFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE); // sets default operation for closing
     BorderLayout layout = new BorderLayout(); // uses BorderLayout
     JPanel background = new JPanel(layout); // creates a new jpanel to hold the layouts
@@ -57,12 +88,26 @@ public class BeatBox {
     buttonBox.add(downTempo);
 
     JButton serializeIt = new JButton("Save");
-    serializeIt.addActionListener(new MySendListener());
+    serializeIt.addActionListener(new MySaveListener());
     buttonBox.add(serializeIt);
 
     JButton restore = new JButton("Load");
     restore.addActionListener(new MyReadInListener());
     buttonBox.add(restore);
+
+    incomingList = new JList(); // instantiate a list for all messages
+    incomingList.addListSelectionListener(new MyListSelectionListener()); // associate list with MyListSelectionListener event
+    incomingList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION); // set selection mode for the JList (to load and play the attached track)
+    JScrollPane theList = new JScrollPane(incomingList); //  create ScrollPanel to hold all the messages
+    buttonBox.add(theList); // add the scroll panel to the button area
+    incomingList.setListData(listVector); // set the data of the list to the list vector of strings
+
+    userMessage = new JTextField(); // instantiate text field for user's message
+    buttonBox.add(userMessage); // add the text box to the buttons
+
+    JButton sendMessage = new JButton("Send Message");
+    sendMessage.addActionListener(new MySendMessageListener());
+    buttonBox.add(sendMessage);
 
     Box nameBox = new Box(BoxLayout.Y_AXIS); // creates a second box layout to hold the names of the instruments
     for (int i = 0; i < 16; i++) { // iterates through the names and displays them as a label
@@ -87,8 +132,6 @@ public class BeatBox {
       mainPanel.add(c); // add the checkboxes to the mainPanel
     }
 
-    setUpMidi(); // sets the default actions for sequencer / sequence / track
-
     theFrame.setBounds(50, 50, 300, 300); // set bounds for the frame
     theFrame.pack(); // pack the frame
     theFrame.setVisible(true); // allow the frame to be seen
@@ -105,28 +148,27 @@ public class BeatBox {
   }
 
   public void buildTrackAndStart() {
-    int[] trackList = null; // resets the trackList to null
+    ArrayList<Integer> trackList = null; // holds the instruments for each
 
     sequence.deleteTrack(track); //clears the track
     track = sequence.createTrack(); //sets the track to a new one
 
     for (int i = 0; i < 16; i++) { // iterate through each row of the checkboxes
-      trackList = new int[16]; //set tracklist equal to an array of 16 ints
+      trackList = new ArrayList<Integer>(); //set tracklist to an array list object
 
-      int key = instruments[i]; // set the key equal to its corresponding instrument
 
       for (int j = 0; j < 16; j++) { // iterate through the items in each row
-
-        JCheckBox jc = checkboxList.get(j + 16*i); // create a new checkbox for each item
+        JCheckBox jc = (JCheckBox) checkboxList.get(j + (16*i)); // get state for each checkbox item
         if(jc.isSelected()) { // if the checkBox is selected, set it to its corresponding instrument
-          trackList[j] = key;
+          int key = instruments[i]; // set the key equal to its corresponding instrument
+          trackList.add(new Integer(key));
         } else {
-          trackList[j] = 0; // else set it to 0 (no sound)
+          trackList.add(null); // else set it to null (no sound)
         }
       }
 
       makeTracks(trackList); // make the track using the new trackList
-      track.add(makeEvent(176, 1, 127, 0, 16)); // add the keys to the track
+      // track.add(makeEvent(176, 1, 127, 0, 16)); // make events for all 16 beats
     }
 
     track.add(makeEvent(192, 9, 1, 0, 15)); // ensures the beatbox reaches full 16 beats
@@ -164,14 +206,14 @@ public class BeatBox {
     }
   }
 
-  public void makeTracks(int[] list) { // called in buildTrackAndStart() method
-    // makes events for each instruments based of of the trackList array in buildTrackAndStart() method
-    for (int i = 0; i < 16; i++) {
-      int key = list[i];
-
-      if(key != 0) { // if the key is not set to 0, note on and off event are added to the track
-        track.add(makeEvent(144, 9, key, 100, i));
-        track.add(makeEvent(128, 9, key, 100, i+1));
+  public void makeTracks(ArrayList list) { // called in buildTrackAndStart() method, takes the newlist as an argument
+    Iterator it = list.iterator();
+    for (int i = 0; i < 16; i++) { // iterates through the newlist
+      Integer num = (Integer) it.next(); // reads through each item on the list
+      if(num != null) { // if the key is not set to 0, note on and off event are added to the track
+        int numKey = num.intValue(); // get the value of that key
+        track.add(makeEvent(144, 9, numKey, 100, i));
+        track.add(makeEvent(128, 9, numKey, 100, i+1));
       }
     }
   }
@@ -187,9 +229,9 @@ public class BeatBox {
     return event;
   }
 
-  public class MySendListener implements ActionListener {
+  public class MySaveListener implements ActionListener {
     public void actionPerformed(ActionEvent a) {
-      boolean[] checkboxState = new boolean[256]; // saves the state of the checkboxes
+      boolean[] checkboxState = new boolean[256]; // saves the STATE of the checkboxes
       for(int i = 0; i < 256; i++) { // walkthrough arraylist of checkboxes and add to boolean arraylist
         JCheckBox check = (JCheckBox) checkboxList.get(i);
         if (check.isSelected()) {
@@ -205,7 +247,81 @@ public class BeatBox {
     }
   }
 
-  public class MyReadInListener implements ActionListener {
+public class MySendMessageListener implements ActionListener {
+  public void actionPerformed(ActionEvent a) {
+    boolean[] checkboxState = new boolean[256];
+    for(int i = 0; i < 256; i++) {
+      JCheckBox check = (JCheckBox) checkboxList.get(i); // get checkBox states
+      if (check.isSelected()) {
+        checkboxState[i] = true;
+      }
+    }
+    String messageToSend = null; // initialize message to send to other users
+    try {
+      out.writeObject(userName + nextNum++ + ": " + userMessage.getText()); // writes the message to the server, using the username
+      out.writeObject(checkboxState); // writes the state of checkboxes for other users to load
+    } catch (Exception ex) {
+      System.out.println("Error. Connection to server was lost.");
+    }
+    userMessage.setText(""); // reset the text box after submission
+  }
+}
+
+public class MyListSelectionListener implements ListSelectionListener { // whene a user selected a message to load
+  public void valueChanged(ListSelectionEvent le) {
+    if(!le.getValueIsAdjusting()) {
+      String selected = (String) incomingList.getSelectedValue();
+      if (selected != null) {
+        //go to the map and change the sequence
+        boolean[] selectedState = (boolean[]) otherSeqsMap.get(selected); // get associated beat pattern in the hash map otherSeqsMap
+        changeSequence(selectedState); // load the associated beat pattern
+        sequencer.stop();
+        buildTrackAndStart(); // start playing the new sequence
+      }
+    }
+  }
+}
+
+public class RemoteReader implements Runnable { // thread that reads data from the server, called in startUp method
+  boolean[] checkboxState = null; // initialize state, name to display, and the obj (array list of checkboxes)
+  String nameToShow = null;
+  Object obj = null;
+  public void run() { // first method to run when thread is running
+    try {
+      while ((obj=in.readObject()) != null) { // while there is an object to read
+        System.out.println("Received object from server.");
+        System.out.println(obj.getClass()); // get the object's class informaiton
+        // deserialize the object states (message and arraylist of checkbox states (boolean))
+        String nameToShow = (String) obj; // set the name to show to the object's name
+        checkboxState = (boolean[]) in.readObject(); // cast boolean array of input steam's read object
+        otherSeqsMap.put(nameToShow, checkboxState); // add name and object state to the hash map
+        listVector.add(nameToShow); // add the name of object to list vector of strings
+        incomingList.setListData(listVector); // add new data to the incoming list
+      }
+    } catch (Exception ex) { ex.printStackTrace(); }
+  }
+}
+
+public class MyPlayMineListener implements ActionListener {
+  public void actionPerformed(ActionEvent a) {
+    if (mySequence != null) {
+      sequence = mySequence; // restore to user's original sequence
+    }
+  }
+}
+
+public void changeSequence(boolean[] checkboxState) { // immediately loads the selected pattern from the list (called in MyListSelectionListener)
+  for (int i = 0; i < 256; i++) { // go through each checkbox
+    JCheckBox check = (JCheckBox) checkboxList.get(i); // get the state of the checkbox
+    if (checkboxState[i]) { // if the checkbox is true
+      check.setSelected(true); // set the checkBox object to checked
+    } else {
+      check.setSelected(false); // else set to unchecked
+    }
+  }
+}
+
+  public class MyReadInListener implements ActionListener { // loads a saved pattern from the file directory
     public void actionPerformed(ActionEvent a) {
       boolean[] checkboxState = null; // initialize holder for previous checkbox states
       try {
